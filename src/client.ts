@@ -1,6 +1,7 @@
 import { RedisQueue, queueKey } from "./queue/RedisQueue.ts";
 import type { RunStore } from "./store/RunStore.ts";
 import type { PayloadOf, TaskDefinition } from "./task.ts";
+import { recordFailure, tracer } from "./tracing.ts";
 import type { Run, RunEvent } from "./types.ts";
 
 export interface TriggerOptions {
@@ -32,19 +33,31 @@ export class TaskClient {
      * worker's recovery loop puts it back in Redis.
      */
     async trigger<T extends TaskDefinition>(task: T, payload: PayloadOf<T>, options: TriggerOptions = {}): Promise<Triggered> {
-        const parsed = task.parsePayload(payload);
-        const { run, created } = await this.#store.create({
-            taskId: task.id,
-            payload: parsed,
-            queue: task.queue.name,
-            concurrencyKey: options.concurrencyKey ?? null,
-            idempotencyKey: options.idempotencyKey ?? null,
-            runAt: new Date(Date.now() + (options.delayMs ?? 0)),
-            traceId: null,
-            spanId: null,
+        return tracer().startActiveSpan(`trigger ${task.id}`, async (span) => {
+            try {
+                const parsed = task.parsePayload(payload);
+                const { traceId, spanId } = span.spanContext();
+                const sampled = span.isRecording();
+                const { run, created } = await this.#store.create({
+                    taskId: task.id,
+                    payload: parsed,
+                    queue: task.queue.name,
+                    concurrencyKey: options.concurrencyKey ?? null,
+                    idempotencyKey: options.idempotencyKey ?? null,
+                    runAt: new Date(Date.now() + (options.delayMs ?? 0)),
+                    traceId: sampled ? traceId : null,
+                    spanId: sampled ? spanId : null,
+                });
+                span.setAttributes({ "run.id": run.id, "run.created": created, "task.id": task.id });
+                if (created) await this.#queue.enqueue(queueKey(run.queue, run.concurrencyKey), run.id, run.runAt);
+                return { id: run.id, created };
+            } catch (error) {
+                recordFailure(span, error);
+                throw error;
+            } finally {
+                span.end();
+            }
         });
-        if (created) await this.#queue.enqueue(queueKey(run.queue, run.concurrencyKey), run.id, run.runAt);
-        return { id: run.id, created };
     }
 
     retrieve(id: string): Promise<Run | undefined> {

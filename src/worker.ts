@@ -3,6 +3,7 @@ import { retryDelay, shouldRetry } from "./backoff.ts";
 import { RedisQueue, queueKey, queueName } from "./queue/RedisQueue.ts";
 import type { Lease, RunStore } from "./store/RunStore.ts";
 import type { TaskRegistry } from "./task.ts";
+import { linkTo, recordFailure, tracer } from "./tracing.ts";
 
 export interface WorkerOptions {
     readonly tasks: TaskRegistry;
@@ -170,6 +171,10 @@ export class Worker {
             return;
         }
 
+        const span = tracer().startSpan(`run ${task.id}`, {
+            links: linkTo(run.traceId, run.spanId),
+            attributes: { "run.id": runId, "run.attempt": run.attempt, "task.id": task.id, "queue.key": key, "worker.id": this.id },
+        });
         const controller = new AbortController();
         this.#controllers.set(runId, controller);
         const timeout = setTimeout(() => controller.abort(new Error(`Exceeded maxDurationMs (${task.maxDurationMs} ms)`)), task.maxDurationMs);
@@ -187,17 +192,26 @@ export class Worker {
         try {
             const output = await abortable(task.execute(run.payload, { runId, attempt: run.attempt, signal: controller.signal }), controller.signal);
             if (this.#killed) return;
-            await store.complete(lease, output);
+            const accepted = await store.complete(lease, output);
+            span.setAttribute("run.outcome", accepted ? "completed" : "lease_lost");
         } catch (error) {
-            if (this.#killed || controller.signal.reason instanceof LeaseLost) return;
+            if (this.#killed) return;
+            if (controller.signal.reason instanceof LeaseLost) {
+                span.setAttribute("run.outcome", "lease_lost");
+                return;
+            }
             const reason = controller.signal.aborted ? message(controller.signal.reason) : message(error);
+            recordFailure(span, controller.signal.aborted ? controller.signal.reason : error);
             if (shouldRetry(run.attempt, task.retry)) {
                 const retryAt = new Date(Date.now() + retryDelay(run.attempt, task.retry, this.#o.random));
                 if (await store.fail(lease, reason, retryAt)) await queue.enqueue(key, runId, retryAt);
+                span.setAttributes({ "run.outcome": "retry_scheduled", "run.retry_at": retryAt.toISOString() });
             } else {
                 await store.fail(lease, reason, null);
+                span.setAttribute("run.outcome", "failed");
             }
         } finally {
+            span.end();
             this.#controllers.delete(runId);
             clearTimeout(timeout);
             clearInterval(heartbeat);
