@@ -51,6 +51,8 @@ export function task<Payload, Output>(options: TaskOptions<Payload, Output>): Ta
     if (!TASK_ID.test(options.id)) throw new Error(`Invalid task id "${options.id}": use lowercase letters, digits, - _ .`);
     const retry = { ...DEFAULT_RETRY, ...options.retry };
     if (retry.maxAttempts < 1) throw new Error(`Task "${options.id}": maxAttempts must be at least 1`);
+    const queueName = options.queue?.name ?? options.id;
+    if (!TASK_ID.test(queueName)) throw new Error(`Invalid queue name "${queueName}": use lowercase letters, digits, - _ .`);
     const concurrencyLimit = options.queue?.concurrencyLimit ?? DEFAULT_CONCURRENCY;
     if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 1) throw new Error(`Task "${options.id}": concurrencyLimit must be a positive integer`);
     const parsePayload = (payload: unknown): Payload => {
@@ -63,7 +65,7 @@ export function task<Payload, Output>(options: TaskOptions<Payload, Output>): Ta
     return {
         id: options.id,
         retry,
-        queue: { name: options.queue?.name ?? options.id, concurrencyLimit },
+        queue: { name: queueName, concurrencyLimit },
         maxDurationMs: options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS,
         parsePayload,
         execute: (payload, context) => options.run(parsePayload(payload), context),
