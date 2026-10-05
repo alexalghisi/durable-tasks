@@ -1,6 +1,6 @@
 import type { Redis } from "ioredis";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { RedisQueue, queueKey } from "../src/queue/RedisQueue.ts";
+import { RedisQueue, queueKey, queueName } from "../src/queue/RedisQueue.ts";
 import { freshRedis, hasServices } from "./support.ts";
 
 const past = new Date(Date.now() - 1_000);
@@ -9,6 +9,8 @@ describe("queueKey", () => {
     it("scopes a queue by concurrency key", () => {
         expect(queueKey("sync", null)).toBe("sync");
         expect(queueKey("sync", "customer-7")).toBe("sync:customer-7");
+        expect(queueName("sync:customer:7")).toBe("sync");
+        expect(queueName("sync")).toBe("sync");
     });
 });
 
@@ -60,6 +62,14 @@ describe.skipIf(!hasServices)("RedisQueue", () => {
         await queue.release("emails", id ?? "");
         await queue.dequeue("emails", 5, 1_000);
         expect(await queue.activeQueues()).toEqual(["sync:customer-7"]);
+    });
+
+    it("restores missing runs without touching runs in flight", async () => {
+        await queue.enqueue("q", "run_1", past);
+        await queue.dequeue("q", 5, 10_000);
+        expect(await queue.restore("q", "run_1", past)).toBe(false);
+        expect(await queue.restore("q", "run_2", past)).toBe(true);
+        expect(await queue.depth("q")).toEqual({ ready: 1, running: 1 });
     });
 
     it("extends leases only for runs that are still running", async () => {
