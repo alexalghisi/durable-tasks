@@ -25,9 +25,18 @@ redis.call('ZADD', KEYS[2], ARGV[3], due[1])
 return due[1]
 `;
 
-export interface Dequeued {
-    readonly queue: string;
-    readonly runId: string;
+// Puts a run back in the ready set unless a worker is currently holding it.
+const RESTORE = `
+if redis.call('ZSCORE', KEYS[2], ARGV[2]) then return 0 end
+redis.call('ZADD', KEYS[1], 'NX', ARGV[1], ARGV[2])
+redis.call('SADD', KEYS[3], ARGV[3])
+return 1
+`;
+
+/** The queue name part of a queue key. Queue names can't contain ':', concurrency keys can. */
+export function queueName(key: string): string {
+    const at = key.indexOf(":");
+    return at === -1 ? key : key.slice(0, at);
 }
 
 /**
@@ -57,6 +66,11 @@ export class RedisQueue {
 
     async enqueue(queue: string, runId: string, runAt: Date): Promise<void> {
         await this.#redis.multi().zadd(this.#ready(queue), runAt.getTime(), runId).sadd(this.#active, queue).exec();
+    }
+
+    /** Re-adds a run found queued in Postgres. Used by recovery, so it must not disturb runs in flight. */
+    async restore(queue: string, runId: string, runAt: Date): Promise<boolean> {
+        return (await this.#redis.eval(RESTORE, 3, this.#ready(queue), this.#running(queue), this.#active, runAt.getTime(), runId, queue)) === 1;
     }
 
     /** Takes the next due run of a queue if it has a free concurrency slot. */
