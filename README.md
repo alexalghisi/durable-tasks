@@ -2,6 +2,8 @@
 
 Background tasks for Node.js that survive what production throws at them: workers that crash mid-run, providers that return 503, a customer who triggers the same job twice, a Redis that restarts. You write an async function; the runtime handles retries, concurrency limits, recovery and tracing, on Postgres and Redis.
 
+**Download:** [latest release](https://github.com/alexalghisi/durable-tasks/releases/latest)
+
 ![Demo: retries, per-customer concurrency, idempotency and a worker killed mid-run, then the worker test suite](docs/demo.gif)
 
 ## Defining and triggering a task
